@@ -1,0 +1,14 @@
+{
+  "listen": ":8080",
+  "origin": "http://localhost:9000",
+  "audit_path": "",
+  "worker_pool_size": 8,
+  "max_bytes": 10485760,
+  "max_pixels": 40000000,
+  "strip_metadata": true,
+  "routes": [
+    { "path_prefix": "/upload/avatars", "action": "redact", "detectors": ["region-marker"] },
+    { "path_prefix": "/upload",         "action": "blur",   "detectors": ["region-marker", "regex-pii"] },
+    { "path_prefix": "/",               "action": "pass" }
+  ]
+}
