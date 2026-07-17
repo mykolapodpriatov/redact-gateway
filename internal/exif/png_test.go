@@ -90,6 +90,54 @@ func TestStripPNGRejectsMalformed(t *testing.T) {
 	}
 }
 
+// TestStripPNGStopsAtIEND pins the traversal semantics of the IEND branch: the
+// chunk walk must terminate at IEND, so nothing trailing the IEND chunk is
+// copied to the output.
+//
+// The trailing chunk here is an IDAT — an *allowlisted* type — deliberately.
+// Using a trailing metadata chunk (eXIf) would not test the IEND stop at all,
+// since the allowlist alone would drop it and the test would still pass even if
+// the walk ran past IEND. Only an allowlisted trailing chunk distinguishes
+// "stopped at IEND" from "kept walking and appended after IEND", which would
+// emit a corrupt PNG with bytes after the terminator.
+func TestStripPNGStopsAtIEND(t *testing.T) {
+	base := testutil.EncodePNG(testutil.SolidRGBA(8, 8, nil))
+
+	// A trailing eXIf (metadata, must never survive) followed by a trailing
+	// IDAT (allowlisted, must still be dropped because IEND already ended the
+	// stream).
+	in := append([]byte(nil), base...)
+	in = append(in, pngChunk("eXIf", []byte("Exif\x00\x00TRAILING-PNG-GPS"))...)
+	in = append(in, pngChunk("IDAT", []byte("TRAILING-IDAT"))...)
+	if !testutil.HasPNGChunk(in, "eXIf") {
+		t.Fatal("test input is missing the trailing eXIf chunk")
+	}
+
+	out, err := exif.StripPNG(in)
+	if err != nil {
+		t.Fatalf("strip: %v", err)
+	}
+	if testutil.HasPNGChunk(out, "eXIf") {
+		t.Error("eXIf chunk trailing IEND survived stripping")
+	}
+	if bytes.Contains(out, []byte("TRAILING-PNG-GPS")) {
+		t.Error("eXIf payload trailing IEND survived stripping")
+	}
+	if bytes.Contains(out, []byte("TRAILING-IDAT")) {
+		t.Error("walk did not stop at IEND: trailing IDAT was copied past the terminator")
+	}
+	// The walk must still emit a complete, decodable image ending at IEND.
+	if !testutil.HasPNGChunk(out, "IHDR") || !testutil.HasPNGChunk(out, "IDAT") || !testutil.HasPNGChunk(out, "IEND") {
+		t.Fatal("a critical chunk was dropped")
+	}
+	if !bytes.Equal(out, base) {
+		t.Error("output is not byte-identical to the untrailed base PNG")
+	}
+	if _, err := png.Decode(bytes.NewReader(out)); err != nil {
+		t.Fatalf("output does not decode: %v", err)
+	}
+}
+
 func TestStripPNGRejectsMissingIEND(t *testing.T) {
 	// Signature + a well-formed eXIf chunk but no IEND terminator.
 	out := append([]byte(nil), []byte("\x89PNG\r\n\x1a\n")...)

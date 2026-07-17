@@ -91,8 +91,11 @@ func StripPNG(data []byte) ([]byte, error) {
 			out = append(out, data[i:chunkEnd]...)
 		}
 		if ctype == "IEND" {
+			// IEND terminates the stream, so stop here: any bytes trailing the
+			// IEND chunk are not part of the image and are dropped rather than
+			// forwarded (a metadata chunk appended after IEND must not survive).
+			// No need to advance i — it is not read after the loop.
 			sawIEND = true
-			i = chunkEnd
 			break
 		}
 		i = chunkEnd
