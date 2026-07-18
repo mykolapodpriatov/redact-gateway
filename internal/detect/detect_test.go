@@ -121,6 +121,53 @@ func TestRegexPIIOverFakeOCR(t *testing.T) {
 	}
 }
 
+// TestDefaultPatternsIBANAndPhone drives the iban and E.164 phone categories
+// through a fake OCR with positive matches and near-miss negatives (lowercase
+// IBAN, too-short IBAN, a non-IBAN word, a phone without '+', a phone with a
+// zero country code, and a too-short phone).
+func TestDefaultPatternsIBANAndPhone(t *testing.T) {
+	cases := []struct {
+		name    string
+		text    string
+		wantCat string // "" means no region expected
+	}{
+		{"ibanGB", "transfer to GB82WEST12345698765432 now", "iban"},
+		{"ibanDE", "IBAN DE89370400440532013000", "iban"},
+		{"ibanLowercaseNearMiss", "iban gb82west12345698765432", ""},
+		{"ibanTooShortNearMiss", "acct GB82", ""},
+		{"ibanNoCheckDigitsNearMiss", "ref INVOICE2024XYZ", ""},
+		{"phoneE164US", "call +14155552671 please", "phone"},
+		{"phoneE164UK", "ring +442071838750", "phone"},
+		{"phoneNoPlusNearMiss", "id 1234567890", ""},
+		{"phoneLeadingZeroNearMiss", "num +0123456789", ""},
+		{"phoneTooShortNearMiss", "x +123", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ocr := &detect.FakeOCR{Boxes: []detect.TextBox{
+				{Text: tc.text, Rect: image.Rect(0, 0, 100, 10)},
+			}}
+			d := &detect.RegexPIIDetector{OCR: ocr, Patterns: detect.DefaultPIIPatterns()}
+			regions, err := d.Detect(context.Background(), testutil.SolidRGBA(100, 20, color.White))
+			if err != nil {
+				t.Fatalf("detect: %v", err)
+			}
+			if tc.wantCat == "" {
+				if len(regions) != 0 {
+					t.Fatalf("want no region for %q, got %+v", tc.text, regions)
+				}
+				return
+			}
+			if len(regions) != 1 {
+				t.Fatalf("want 1 region for %q, got %d: %+v", tc.text, len(regions), regions)
+			}
+			if regions[0].Category != tc.wantCat {
+				t.Fatalf("category = %q, want %q (text %q)", regions[0].Category, tc.wantCat, tc.text)
+			}
+		})
+	}
+}
+
 func TestRegexPIINopOCRFindsNothing(t *testing.T) {
 	d := &detect.RegexPIIDetector{OCR: detect.NopOCR{}, Patterns: detect.DefaultPIIPatterns()}
 	regions, err := d.Detect(context.Background(), testutil.SolidRGBA(10, 10, color.White))

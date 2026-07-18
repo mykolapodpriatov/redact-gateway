@@ -34,15 +34,23 @@ type PIIPattern struct {
 }
 
 // DefaultPIIPatterns returns a small, conservative set of PII regexes
-// (email-like, payment-card-like, US-SSN-like). They are intentionally simple
-// and meant to run over OCR text, not raw bytes. The "card" pattern is gated by
-// a Luhn checksum (LuhnValid) so a bare 13-19 digit run that is not a real
-// payment card is not masked.
+// (email-like, payment-card-like, US-SSN-like, IBAN-like, E.164-phone-like).
+// They are intentionally simple and meant to run over OCR text, not raw bytes.
+// The "card" pattern is gated by a Luhn checksum (LuhnValid) so a bare 13-19
+// digit run that is not a real payment card is not masked. First matching
+// pattern wins per box.
 func DefaultPIIPatterns() []PIIPattern {
 	return []PIIPattern{
 		{Category: "email", Regexp: regexp.MustCompile(`[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}`)},
 		{Category: "card", Regexp: regexp.MustCompile(`\b(?:\d[ \-]?){13,19}\b`), Validate: LuhnValid},
 		{Category: "ssn", Regexp: regexp.MustCompile(`\b\d{3}-\d{2}-\d{4}\b`)},
+		// IBAN: 2-letter country code, 2 check digits, then 11-30 alphanumeric
+		// BBAN characters (total 15-34), matched as a single upper-case token.
+		{Category: "iban", Regexp: regexp.MustCompile(`\b[A-Z]{2}\d{2}[A-Z0-9]{11,30}\b`)},
+		// Phone: E.164 canonical form — a leading '+', a non-zero country-code
+		// digit, then 7-14 more digits (8-15 digits total). The required '+'
+		// keeps bare digit runs (order/tracking IDs) from matching.
+		{Category: "phone", Regexp: regexp.MustCompile(`\+[1-9]\d{7,14}\b`)},
 	}
 }
 
