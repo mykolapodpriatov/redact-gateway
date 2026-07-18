@@ -182,5 +182,7 @@ func buildRegistry() map[string]detect.Detector {
 			OCR:      detect.NopOCR{},
 			Patterns: detect.DefaultPIIPatterns(),
 		},
+		// Deterministic "mask everything" detector for locked-down routes.
+		"full-image": &detect.FullImageDetector{},
 	}
 }

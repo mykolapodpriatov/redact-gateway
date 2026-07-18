@@ -94,6 +94,7 @@ func (d Duration) MarshalJSON() ([]byte, error) {
 var KnownDetectors = map[string]bool{
 	"region-marker": true,
 	"regex-pii":     true,
+	"full-image":    true,
 	"fake":          true,
 }
 
