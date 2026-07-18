@@ -25,16 +25,32 @@ type RegexPIIDetector struct {
 type PIIPattern struct {
 	Category string
 	Regexp   *regexp.Regexp
+	// Validate, when non-nil, is an extra gate applied to the substring the
+	// Regexp matched: the text box becomes a Region only if Validate returns
+	// true. It lets a pattern add a checksum/format constraint (the default
+	// "card" pattern uses LuhnValid) without affecting patterns that leave it
+	// nil (for example email/ssn).
+	Validate func(string) bool
 }
 
 // DefaultPIIPatterns returns a small, conservative set of PII regexes
-// (email-like, payment-card-like, US-SSN-like). They are intentionally simple
-// and meant to run over OCR text, not raw bytes.
+// (email-like, payment-card-like, US-SSN-like, IBAN-like, E.164-phone-like).
+// They are intentionally simple and meant to run over OCR text, not raw bytes.
+// The "card" pattern is gated by a Luhn checksum (LuhnValid) so a bare 13-19
+// digit run that is not a real payment card is not masked. First matching
+// pattern wins per box.
 func DefaultPIIPatterns() []PIIPattern {
 	return []PIIPattern{
 		{Category: "email", Regexp: regexp.MustCompile(`[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}`)},
-		{Category: "card", Regexp: regexp.MustCompile(`\b(?:\d[ \-]?){13,19}\b`)},
+		{Category: "card", Regexp: regexp.MustCompile(`\b(?:\d[ \-]?){13,19}\b`), Validate: LuhnValid},
 		{Category: "ssn", Regexp: regexp.MustCompile(`\b\d{3}-\d{2}-\d{4}\b`)},
+		// IBAN: 2-letter country code, 2 check digits, then 11-30 alphanumeric
+		// BBAN characters (total 15-34), matched as a single upper-case token.
+		{Category: "iban", Regexp: regexp.MustCompile(`\b[A-Z]{2}\d{2}[A-Z0-9]{11,30}\b`)},
+		// Phone: E.164 canonical form — a leading '+', a non-zero country-code
+		// digit, then 7-14 more digits (8-15 digits total). The required '+'
+		// keeps bare digit runs (order/tracking IDs) from matching.
+		{Category: "phone", Regexp: regexp.MustCompile(`\+[1-9]\d{7,14}\b`)},
 	}
 }
 
@@ -66,14 +82,25 @@ func (d *RegexPIIDetector) Detect(ctx context.Context, img image.Image) ([]Regio
 	var regions []Region
 	for _, tb := range boxes {
 		for _, p := range patterns {
-			if p.Regexp != nil && p.Regexp.MatchString(tb.Text) {
-				regions = append(regions, Region{
-					Rect:       tb.Rect,
-					Category:   p.Category,
-					Confidence: 1,
-				})
-				break
+			if p.Regexp == nil {
+				continue
 			}
+			m := p.Regexp.FindString(tb.Text)
+			if m == "" {
+				continue
+			}
+			// A per-pattern Validate hook (e.g. LuhnValid for "card") gates the
+			// matched substring. When it fails, keep scanning later patterns so
+			// a false-positive card run can still match a genuine category.
+			if p.Validate != nil && !p.Validate(m) {
+				continue
+			}
+			regions = append(regions, Region{
+				Rect:       tb.Rect,
+				Category:   p.Category,
+				Confidence: 1,
+			})
+			break
 		}
 	}
 	sortRegions(regions)

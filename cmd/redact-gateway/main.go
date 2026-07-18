@@ -25,6 +25,7 @@ import (
 	"redact-gateway/internal/audit"
 	"redact-gateway/internal/config"
 	"redact-gateway/internal/detect"
+	"redact-gateway/internal/metrics"
 	"redact-gateway/internal/policy"
 	"redact-gateway/internal/pool"
 	"redact-gateway/internal/proxy"
@@ -66,12 +67,15 @@ func run(configPath string) error {
 
 	wp := pool.New(cfg.WorkerPoolSize, time.Duration(cfg.AcquireTimeout))
 
+	met := metrics.New()
+
 	sanitizer := &proxy.Sanitizer{
 		Registry:    registry,
 		Audit:       audit.NewLogger(auditW, audit.SystemClock{}),
 		MaxPixels:   cfg.MaxPixels,
 		JPEGQuality: cfg.JPEGQuality,
 		BlurRadius:  cfg.BlurRadius,
+		Metrics:     met,
 	}
 
 	handler := proxy.New(proxy.Config{
@@ -86,15 +90,36 @@ func run(configPath string) error {
 		Handler: handler,
 	}
 
-	return serve(srv, wp, time.Duration(cfg.DrainTimeout))
+	// Optional admin listener for /healthz + /metrics on a SEPARATE address so
+	// health/metrics can never be interceptable as an upload on the proxy
+	// listener. Disabled when metrics_listen is empty (the default).
+	var admin *http.Server
+	if cfg.MetricsListen != "" {
+		admin = &http.Server{
+			Addr:    cfg.MetricsListen,
+			Handler: met.Handler(),
+		}
+	}
+
+	return serve(srv, admin, wp, time.Duration(cfg.DrainTimeout))
 }
 
-// serve runs the HTTP server and performs graceful shutdown on SIGINT/SIGTERM:
-// it drains in-flight image jobs (complete-or-nothing within the deadline)
-// BEFORE shutting the server down.
-func serve(srv *http.Server, wp *pool.Pool, drainTimeout time.Duration) error {
+// serve runs the HTTP server (and the optional admin listener) and performs
+// graceful shutdown on SIGINT/SIGTERM: it drains in-flight image jobs
+// (complete-or-nothing within the deadline) BEFORE shutting the servers down.
+// admin may be nil (metrics disabled).
+func serve(srv, admin *http.Server, wp *pool.Pool, drainTimeout time.Duration) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	if admin != nil {
+		go func() {
+			log.Printf("redact-gateway: admin (healthz+metrics) listening on %s", admin.Addr)
+			if err := admin.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				log.Printf("redact-gateway: admin listener error: %v", err)
+			}
+		}()
+	}
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -124,6 +149,11 @@ func serve(srv *http.Server, wp *pool.Pool, drainTimeout time.Duration) error {
 	}
 	if err := srv.Shutdown(drainCtx); err != nil {
 		log.Printf("redact-gateway: server shutdown: %v", err)
+	}
+	if admin != nil {
+		if err := admin.Shutdown(drainCtx); err != nil {
+			log.Printf("redact-gateway: admin shutdown: %v", err)
+		}
 	}
 	return nil
 }
@@ -182,5 +212,7 @@ func buildRegistry() map[string]detect.Detector {
 			OCR:      detect.NopOCR{},
 			Patterns: detect.DefaultPIIPatterns(),
 		},
+		// Deterministic "mask everything" detector for locked-down routes.
+		"full-image": &detect.FullImageDetector{},
 	}
 }

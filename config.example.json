@@ -1,5 +1,6 @@
 {
   "listen": ":8080",
+  "metrics_listen": ":9090",
   "origin": "http://localhost:9000",
   "audit_path": "",
   "worker_pool_size": 8,

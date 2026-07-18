@@ -37,7 +37,8 @@ The whole point of a redaction proxy is that **it must never forward bytes it co
 - **Per-route policy:** `redact` (solid box), `blur` (bounded box blur), `drop` (reject the upload), `pass` (no mask, but still strip metadata + audit). Longest-prefix route match.
 - **Detectors (pluggable `Detector` interface):**
   - `region-marker` — finds rectangular zones painted in a configured marker color (deterministic; great for explicit "redact this area" workflows and tests),
-  - `regex-pii` — runs email/card/SSN-style regexes over a pluggable `OCR` interface (the default OCR is a no-op, so it finds nothing until a real OCR adapter is supplied — see Scope),
+  - `full-image` — reports one region covering the whole frame, for locked-down routes that must mask **every** pixel regardless of content (deterministic; stdlib-only),
+  - `regex-pii` — runs email/card/SSN/IBAN/phone-style regexes over a pluggable `OCR` interface (the default OCR is a no-op, so it finds nothing until a real OCR adapter is supplied — see Scope). Categories: `email`, `card`, `ssn`, `iban` (2-letter country + check digits + BBAN), and `phone` (E.164, `+`-prefixed). The `card` category is additionally **Luhn-validated**: a matched 13-19 digit run is only masked when its mod-10 checksum passes, so order numbers, IMEIs, and tracking/serial IDs no longer trigger a false-positive redaction. Validation is a per-pattern `Validate func(string) bool` hook, so the other categories are unaffected and custom patterns can opt in,
   - plus deterministic fakes for testing.
 - **Order-stable multipart re-serialization:** images are sanitized concurrently but re-emitted **by original part index**; original part headers are preserved; per-part and outer `Content-Length` are recomputed; the forwarded `Content-Type` **reuses the original `boundary=` verbatim**; text/non-image parts are copied byte-for-byte.
 - **Audit log (JSON lines)** `{ts_label, route, action, categories, bboxes, sanitized_sha256}`. The hash is of the **sanitized** output only. `ts_label` is **gateway-generated** (a monotonic counter + an injected clock), never request-derived, and every string is JSON-escaped — so a hostile filename can't inject or split a log line. **No original pixels are ever written.**
@@ -68,6 +69,7 @@ A minimal config (`config.example.json`):
 ```json
 {
   "listen": ":8080",
+  "metrics_listen": ":9090",
   "origin": "http://localhost:9000",
   "audit_path": "",
   "worker_pool_size": 8,
@@ -82,7 +84,18 @@ A minimal config (`config.example.json`):
 }
 ```
 
-Config may be supplied by file and/or these environment overrides: `REDACT_LISTEN`, `REDACT_ORIGIN`, `REDACT_AUDIT_PATH`, `REDACT_WORKER_POOL_SIZE`, `REDACT_MAX_BYTES`, `REDACT_MAX_PIXELS`. An empty `audit_path` logs audit lines to stdout.
+Config may be supplied by file and/or these environment overrides: `REDACT_LISTEN`, `REDACT_METRICS_LISTEN`, `REDACT_ORIGIN`, `REDACT_AUDIT_PATH`, `REDACT_WORKER_POOL_SIZE`, `REDACT_MAX_BYTES`, `REDACT_MAX_PIXELS`. An empty `audit_path` logs audit lines to stdout.
+
+## Observability
+
+When `metrics_listen` is set (it is **off by default**), the gateway serves `GET /healthz` (a plain `200 ok` liveness probe) and `GET /metrics` (hand-rolled Prometheus text exposition, stdlib-only) on that **separate** admin address — never the proxy listener, so health/metrics can't be intercepted as uploads. The counters are:
+
+- `redact_uploads_processed_total` — upload items entering sanitization,
+- `redact_uploads_blocked_total` — items blocked fail-closed (origin got nothing),
+- `redact_images_sanitized_total` — images decoded, masked, and re-encoded,
+- `redact_regions_masked_total` — sensitive regions masked across all images.
+
+Every sample is an **unlabeled** counter: no image bytes, filenames, or request-derived strings are ever attached to a metric, so the metrics surface can't become a leak channel — the same fail-closed no-leak invariant the audit log upholds.
 
 ## Scope (honest by design)
 

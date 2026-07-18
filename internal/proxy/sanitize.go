@@ -11,6 +11,7 @@ import (
 	"redact-gateway/internal/detect"
 	"redact-gateway/internal/exif"
 	"redact-gateway/internal/imageproc"
+	"redact-gateway/internal/metrics"
 	"redact-gateway/internal/policy"
 )
 
@@ -63,6 +64,10 @@ type Sanitizer struct {
 	// JPEGQuality and BlurRadius configure masking output.
 	JPEGQuality int
 	BlurRadius  int
+	// Metrics, when non-nil, receives per-item counter updates (processed,
+	// blocked, images sanitized, regions masked). Its methods are nil-safe, so
+	// a nil Metrics simply disables counting.
+	Metrics *metrics.Metrics
 }
 
 // ItemResult is the outcome of sanitizing one item.
@@ -84,7 +89,15 @@ type ItemResult struct {
 // re-encode failure, or a detector error) returns a blockError unless the
 // route opts into fail-open. On a pass route a strip_metadata error is also a
 // blockError unless fail-open.
-func (s *Sanitizer) SanitizeImage(ctx context.Context, route policy.Route, data []byte, isImage bool) (*ItemResult, error) {
+func (s *Sanitizer) SanitizeImage(ctx context.Context, route policy.Route, data []byte, isImage bool) (res *ItemResult, err error) {
+	s.Metrics.IncUploadsProcessed()
+	// Count fail-closed outcomes (block/drop) as blocked. A fail-open forward
+	// returns a nil error and is deliberately not counted as blocked.
+	defer func() {
+		if err != nil && (IsBlock(err) || IsDrop(err)) {
+			s.Metrics.IncUploadsBlocked()
+		}
+	}()
 	switch route.Action {
 	case policy.ActionDrop:
 		return nil, &dropError{status: "upload rejected by policy"}
@@ -199,6 +212,8 @@ func (s *Sanitizer) handleMask(ctx context.Context, route policy.Route, data []b
 	if err := s.audited(route, regions, out); err != nil {
 		return s.failClosed(route, data, "audit write failed")
 	}
+	s.Metrics.IncImagesSanitized()
+	s.Metrics.AddRegionsMasked(len(regions))
 	_ = cats
 	return &ItemResult{Output: out, Audited: true}, nil
 }
