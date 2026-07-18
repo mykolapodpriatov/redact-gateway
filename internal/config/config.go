@@ -43,6 +43,7 @@ type RouteConfig struct {
 // Config is the full gateway configuration.
 type Config struct {
 	Listen         string        `json:"listen"`
+	MetricsListen  string        `json:"metrics_listen"`
 	Origin         string        `json:"origin"`
 	Routes         []RouteConfig `json:"routes"`
 	AuditPath      string        `json:"audit_path"`
@@ -128,6 +129,9 @@ func Load(path string) (*Config, error) {
 func applyEnv(cfg *Config) {
 	if v := os.Getenv("REDACT_LISTEN"); v != "" {
 		cfg.Listen = v
+	}
+	if v := os.Getenv("REDACT_METRICS_LISTEN"); v != "" {
+		cfg.MetricsListen = v
 	}
 	if v := os.Getenv("REDACT_ORIGIN"); v != "" {
 		cfg.Origin = v

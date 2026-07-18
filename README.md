@@ -69,6 +69,7 @@ A minimal config (`config.example.json`):
 ```json
 {
   "listen": ":8080",
+  "metrics_listen": ":9090",
   "origin": "http://localhost:9000",
   "audit_path": "",
   "worker_pool_size": 8,
@@ -83,7 +84,18 @@ A minimal config (`config.example.json`):
 }
 ```
 
-Config may be supplied by file and/or these environment overrides: `REDACT_LISTEN`, `REDACT_ORIGIN`, `REDACT_AUDIT_PATH`, `REDACT_WORKER_POOL_SIZE`, `REDACT_MAX_BYTES`, `REDACT_MAX_PIXELS`. An empty `audit_path` logs audit lines to stdout.
+Config may be supplied by file and/or these environment overrides: `REDACT_LISTEN`, `REDACT_METRICS_LISTEN`, `REDACT_ORIGIN`, `REDACT_AUDIT_PATH`, `REDACT_WORKER_POOL_SIZE`, `REDACT_MAX_BYTES`, `REDACT_MAX_PIXELS`. An empty `audit_path` logs audit lines to stdout.
+
+## Observability
+
+When `metrics_listen` is set (it is **off by default**), the gateway serves `GET /healthz` (a plain `200 ok` liveness probe) and `GET /metrics` (hand-rolled Prometheus text exposition, stdlib-only) on that **separate** admin address — never the proxy listener, so health/metrics can't be intercepted as uploads. The counters are:
+
+- `redact_uploads_processed_total` — upload items entering sanitization,
+- `redact_uploads_blocked_total` — items blocked fail-closed (origin got nothing),
+- `redact_images_sanitized_total` — images decoded, masked, and re-encoded,
+- `redact_regions_masked_total` — sensitive regions masked across all images.
+
+Every sample is an **unlabeled** counter: no image bytes, filenames, or request-derived strings are ever attached to a metric, so the metrics surface can't become a leak channel — the same fail-closed no-leak invariant the audit log upholds.
 
 ## Scope (honest by design)
 
