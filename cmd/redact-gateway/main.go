@@ -33,22 +33,52 @@ import (
 
 func main() {
 	configPath := flag.String("config", "", "path to JSON config file (env REDACT_* overrides apply)")
+	validate := flag.Bool("validate", false, "load and validate the config (routes, policy), then exit without starting the server")
 	flag.Parse()
+
+	if *validate {
+		if _, _, _, err := validateConfig(*configPath); err != nil {
+			fmt.Fprintf(os.Stderr, "redact-gateway: config invalid: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println("config OK")
+		return
+	}
 
 	if err := run(*configPath); err != nil {
 		log.Fatalf("redact-gateway: %v", err)
 	}
 }
 
-func run(configPath string) error {
+// validateConfig runs every check that does not require opening the audit
+// file or binding a listener: config.Load (parse + env overrides + defaults +
+// Config.Validate), origin URL parsing, and buildPolicy. run() calls this
+// first and then layers the side effects (audit file, listeners) on top, so
+// -validate exercises exactly the same validation path a real run would hit
+// before anything observable happens.
+func validateConfig(configPath string) (*config.Config, *url.URL, *policy.Policy, error) {
 	cfg, err := config.Load(configPath)
 	if err != nil {
-		return err
+		return nil, nil, nil, err
 	}
 
 	originURL, err := url.Parse(cfg.Origin)
 	if err != nil {
-		return fmt.Errorf("parse origin: %w", err)
+		return nil, nil, nil, fmt.Errorf("parse origin: %w", err)
+	}
+
+	pol, err := buildPolicy(cfg)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	return cfg, originURL, pol, nil
+}
+
+func run(configPath string) error {
+	cfg, originURL, pol, err := validateConfig(configPath)
+	if err != nil {
+		return err
 	}
 
 	// Audit log destination.
@@ -57,11 +87,6 @@ func run(configPath string) error {
 		return err
 	}
 	defer closeAudit()
-
-	pol, err := buildPolicy(cfg)
-	if err != nil {
-		return err
-	}
 
 	registry := buildRegistry()
 

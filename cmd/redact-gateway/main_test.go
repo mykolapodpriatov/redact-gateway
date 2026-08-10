@@ -21,6 +21,65 @@ func TestRunInvalidConfigFails(t *testing.T) {
 	}
 }
 
+func TestValidateConfigValidConfigPasses(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "c.json")
+	body := `{
+		"origin": "http://o:1",
+		"routes": [
+			{"path_prefix": "/", "action": "pass"}
+		]
+	}`
+	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, originURL, pol, err := validateConfig(p)
+	if err != nil {
+		t.Fatalf("expected valid config to pass validation: %v", err)
+	}
+	if cfg == nil || originURL == nil || pol == nil {
+		t.Fatal("validateConfig returned nil result alongside a nil error")
+	}
+}
+
+func TestValidateConfigInvalidConfigFails(t *testing.T) {
+	// Missing origin → config validation error, same failure run() would hit.
+	dir := t.TempDir()
+	p := filepath.Join(dir, "c.json")
+	if err := os.WriteFile(p, []byte(`{"routes": []}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := validateConfig(p); err == nil {
+		t.Fatal("expected validateConfig to fail on invalid config")
+	}
+}
+
+func TestValidateConfigDoesNotTouchAuditFile(t *testing.T) {
+	// audit_path points inside a directory that does not exist, so run()
+	// would fail trying to open it — but validateConfig must succeed because
+	// it never calls openAudit. This is the acceptance criterion from #9: a
+	// bad audit path (or any other side effect run() has) must not stand in
+	// the way of validating routes/policy.
+	dir := t.TempDir()
+	p := filepath.Join(dir, "c.json")
+	body := `{
+		"origin": "http://o:1",
+		"audit_path": "` + filepath.Join(dir, "missing-dir", "audit.log") + `",
+		"routes": [
+			{"path_prefix": "/", "action": "pass"}
+		]
+	}`
+	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := validateConfig(p); err != nil {
+		t.Fatalf("validateConfig should not touch audit_path: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "missing-dir")); err == nil {
+		t.Fatal("validateConfig must not create the audit directory/file")
+	}
+}
+
 func TestBuildRegistryHasDefaultDetectors(t *testing.T) {
 	reg := buildRegistry()
 	if _, ok := reg["region-marker"]; !ok {
