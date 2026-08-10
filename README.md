@@ -64,6 +64,13 @@ go build ./cmd/redact-gateway
 REDACT_ORIGIN="http://localhost:9000" ./redact-gateway -config config.example.json
 ```
 
+Check a config without starting the server (no audit file opened, no listener bound) with `-validate` — handy in CI, a systemd `ExecStartPre`, or a container init step:
+
+```bash
+./redact-gateway -config config.example.json -validate
+# prints "config OK" and exits 0, or prints the validation error and exits non-zero
+```
+
 A minimal config (`config.example.json`):
 
 ```json
