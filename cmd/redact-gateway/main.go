@@ -211,12 +211,13 @@ func buildPolicy(cfg *config.Config) (*policy.Policy, error) {
 			failOpen = *rc.FailOpen
 		}
 		routes = append(routes, policy.Route{
-			PathPrefix:    rc.PathPrefix,
-			Action:        policy.Action(rc.Action),
-			Detectors:     rc.Detectors,
-			FailOpen:      failOpen,
-			MaxBytes:      rc.MaxBytes,
-			StripMetadata: strip,
+			PathPrefix:      rc.PathPrefix,
+			Action:          policy.Action(rc.Action),
+			Detectors:       rc.Detectors,
+			FailOpen:        failOpen,
+			MaxBytes:        rc.MaxBytes,
+			StripMetadata:   strip,
+			AcceptedFormats: rc.AcceptedFormats,
 		})
 	}
 	return policy.New(routes)

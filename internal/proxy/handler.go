@@ -241,6 +241,12 @@ func (h *Handler) processRaw(ctx context.Context, r *http.Request, route policy.
 func (h *Handler) sanitizeItem(ctx context.Context, route policy.Route, data []byte) ([]byte, redactInfo, error) {
 	isImage := sniffIsImage(data)
 
+	// Cheap allowlist after magic-byte sniff and before decode / pool acquire.
+	// Empty AcceptedFormats keeps today's "any sniffed image" behavior.
+	if isImage && !formatAllowed(route.AcceptedFormats, data) {
+		return nil, redactInfo{}, errUnsupportedMedia
+	}
+
 	// Only acquire a pool slot for work that actually decodes/encodes an image
 	// (masking routes on image data). Verbatim pass-through of a non-image part
 	// or a pass-route item is cheap and need not consume a slot.
@@ -311,6 +317,8 @@ func (h *Handler) writeError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, errTooLarge):
 		writeStatus(w, http.StatusRequestEntityTooLarge, "payload too large")
+	case errors.Is(err, errUnsupportedMedia):
+		writeStatus(w, http.StatusUnsupportedMediaType, "unsupported media type")
 	case errors.Is(err, errBackpressure):
 		writeStatus(w, http.StatusServiceUnavailable, "server busy")
 	case IsDrop(err):
@@ -328,8 +336,9 @@ func (h *Handler) writeError(w http.ResponseWriter, err error) {
 // Sentinel errors for status mapping. Their messages are never written to
 // clients (writeError substitutes fixed short strings).
 var (
-	errTooLarge     = errors.New("proxy: payload too large")
-	errBackpressure = errors.New("proxy: backpressure")
+	errTooLarge         = errors.New("proxy: payload too large")
+	errBackpressure     = errors.New("proxy: backpressure")
+	errUnsupportedMedia = errors.New("proxy: unsupported media type")
 )
 
 // sniffIsImage classifies by magic bytes (never Content-Type). It examines at
@@ -340,6 +349,37 @@ func sniffIsImage(data []byte) bool {
 		n = sniffLen
 	}
 	return imageproc.SniffIsImage(data[:n])
+}
+
+// formatAllowed reports whether a sniffed image is on the route allowlist.
+// An empty list accepts any sniffed image. "jpg" is treated as "jpeg".
+func formatAllowed(allow []string, data []byte) bool {
+	if len(allow) == 0 {
+		return true
+	}
+	n := len(data)
+	if n > sniffLen {
+		n = sniffLen
+	}
+	format, ok := imageproc.SniffFormat(data[:n])
+	if !ok {
+		return true
+	}
+	want := string(format)
+	for _, a := range allow {
+		if canonicalFormat(a) == want {
+			return true
+		}
+	}
+	return false
+}
+
+func canonicalFormat(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	if s == "jpg" {
+		return "jpeg"
+	}
+	return s
 }
 
 // copyHeaders copies hop-by-hop-safe headers from src into dst. Hop-by-hop

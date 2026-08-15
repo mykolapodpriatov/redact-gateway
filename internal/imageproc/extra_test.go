@@ -19,6 +19,12 @@ func TestSniffBMPandTIFF(t *testing.T) {
 	if !imageproc.SniffIsImage(tiffLE) || !imageproc.SniffIsImage(tiffBE) {
 		t.Error("TIFF not sniffed as image")
 	}
+	if f, ok := imageproc.SniffFormat(bmp); !ok || f != imageproc.FormatBMP {
+		t.Errorf("BMP format = %q ok=%v", f, ok)
+	}
+	if f, ok := imageproc.SniffFormat(tiffLE); !ok || f != imageproc.FormatTIFF {
+		t.Errorf("TIFF format = %q ok=%v", f, ok)
+	}
 }
 
 func TestMaskTransparentFillBecomesBlack(t *testing.T) {

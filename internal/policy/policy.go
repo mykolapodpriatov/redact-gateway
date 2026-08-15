@@ -48,14 +48,16 @@ func (a Action) Masks() bool {
 // Detectors names which configured detectors run; FailOpen, when true, lets
 // the route forward original bytes on a sanitize failure (UNSAFE, default
 // false); MaxBytes caps each individual part/body (per-part, not just outer);
-// StripMetadata removes EXIF/IPTC/COM from forwarded original bytes.
+// StripMetadata removes EXIF/IPTC/COM from forwarded original bytes;
+// AcceptedFormats is the sniffed-codec allowlist (empty = any sniffed image).
 type Route struct {
-	PathPrefix    string
-	Action        Action
-	Detectors     []string
-	FailOpen      bool
-	MaxBytes      int64
-	StripMetadata bool
+	PathPrefix      string
+	Action          Action
+	Detectors       []string
+	FailOpen        bool
+	MaxBytes        int64
+	StripMetadata   bool
+	AcceptedFormats []string
 }
 
 // Policy is the ordered set of routes plus a default applied when no route
