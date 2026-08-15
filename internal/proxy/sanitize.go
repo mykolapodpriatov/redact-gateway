@@ -77,6 +77,11 @@ type ItemResult struct {
 	Output []byte
 	// Audited indicates an audit entry was written for this item.
 	Audited bool
+	// BoxCount is the number of masked regions. Pass-through and drop report 0.
+	BoxCount int
+	// Categories is the sorted unique detector labels for this item. Never
+	// contains filenames, original bytes, or box coordinates.
+	Categories []string
 }
 
 // SanitizeImage processes one item's bytes under route. data has already been
@@ -214,8 +219,7 @@ func (s *Sanitizer) handleMask(ctx context.Context, route policy.Route, data []b
 	}
 	s.Metrics.IncImagesSanitized()
 	s.Metrics.AddRegionsMasked(len(regions))
-	_ = cats
-	return &ItemResult{Output: out, Audited: true}, nil
+	return &ItemResult{Output: out, Audited: true, BoxCount: len(rects), Categories: cats}, nil
 }
 
 // runDetectors runs every configured detector and returns the union of regions

@@ -7,7 +7,9 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
+	"strings"
 	"sync"
 
 	"redact-gateway/internal/imageproc"
@@ -83,7 +85,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
-	body, contentType, err := h.process(ctx, r, route)
+	body, contentType, info, err := h.process(ctx, r, route)
 	if err != nil {
 		h.writeError(w, err)
 		return
@@ -91,14 +93,69 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Complete-or-nothing: only now, with a fully sanitized body in hand, do
 	// we contact the origin.
-	h.forward(w, r, body, contentType)
+	h.forward(w, r, body, contentType, info)
+}
+
+// redactInfo is the per-request summary written as X-Redacted-* headers.
+// Categories are short detector labels only — never filenames, original
+// bytes, or box coordinates.
+type redactInfo struct {
+	count      int
+	categories []string
+}
+
+func (a redactInfo) merge(b redactInfo) redactInfo {
+	return redactInfo{
+		count:      a.count + b.count,
+		categories: unionSorted(a.categories, b.categories),
+	}
+}
+
+func unionSorted(a, b []string) []string {
+	if len(b) == 0 {
+		if len(a) == 0 {
+			return nil
+		}
+		return append([]string(nil), a...)
+	}
+	if len(a) == 0 {
+		return append([]string(nil), b...)
+	}
+	seen := make(map[string]struct{}, len(a)+len(b))
+	out := make([]string, 0, len(a)+len(b))
+	for _, xs := range [][]string{a, b} {
+		for _, s := range xs {
+			if s == "" {
+				continue
+			}
+			if _, ok := seen[s]; ok {
+				continue
+			}
+			seen[s] = struct{}{}
+			out = append(out, s)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+const (
+	headerRedactedCount      = "X-Redacted-Count"
+	headerRedactedCategories = "X-Redacted-Categories"
+)
+
+// setRedactedHeaders writes the client-facing redaction summary. An empty
+// category list still sets the header so clients can branch uniformly.
+func setRedactedHeaders(h http.Header, info redactInfo) {
+	h.Set(headerRedactedCount, strconv.Itoa(info.count))
+	h.Set(headerRedactedCategories, strings.Join(info.categories, ","))
 }
 
 // process reads, classifies, and sanitizes the request body, returning the
 // fully sanitized body bytes and the Content-Type to forward (with the
 // original multipart boundary preserved). A non-nil error is a block/drop/413
 // decision; the body is never partially produced.
-func (h *Handler) process(ctx context.Context, r *http.Request, route policy.Route) (body []byte, contentType string, err error) {
+func (h *Handler) process(ctx context.Context, r *http.Request, route policy.Route) (body []byte, contentType string, info redactInfo, err error) {
 	ct := r.Header.Get("Content-Type")
 	if boundary, isMultipart := intercept.ParseBoundary(ct); isMultipart {
 		return h.processMultipart(ctx, r, route, boundary, ct)
@@ -110,17 +167,18 @@ func (h *Handler) process(ctx context.Context, r *http.Request, route policy.Rou
 // parts concurrently (results written back by original index), copies
 // text/non-image parts verbatim, and re-serializes using the ORIGINAL boundary
 // so the forwarded Content-Type's boundary= is unchanged.
-func (h *Handler) processMultipart(ctx context.Context, r *http.Request, route policy.Route, boundary, ct string) ([]byte, string, error) {
+func (h *Handler) processMultipart(ctx context.Context, r *http.Request, route policy.Route, boundary, ct string) ([]byte, string, redactInfo, error) {
 	payload, err := intercept.ParseMultipart(r.Body, boundary, route.MaxBytes)
 	if err != nil {
 		if errors.Is(err, intercept.ErrTooLarge) {
-			return nil, "", errTooLarge
+			return nil, "", redactInfo{}, errTooLarge
 		}
-		return nil, "", newBlock("malformed multipart body")
+		return nil, "", redactInfo{}, newBlock("malformed multipart body")
 	}
 
 	// Sanitize each part concurrently; write outputs back by index.
 	outputs := make([][]byte, len(payload.Parts))
+	infos := make([]redactInfo, len(payload.Parts))
 	errs := make([]error, len(payload.Parts))
 	var wg sync.WaitGroup
 	for i := range payload.Parts {
@@ -128,8 +186,9 @@ func (h *Handler) processMultipart(ctx context.Context, r *http.Request, route p
 		wg.Add(1)
 		go func(idx int, p *intercept.Part) {
 			defer wg.Done()
-			out, perr := h.sanitizeItem(ctx, route, p.Body)
+			out, info, perr := h.sanitizeItem(ctx, route, p.Body)
 			outputs[idx] = out
+			infos[idx] = info
 			errs[idx] = perr
 		}(i, part)
 	}
@@ -138,8 +197,13 @@ func (h *Handler) processMultipart(ctx context.Context, r *http.Request, route p
 	// First non-nil error blocks the whole upload (origin gets nothing).
 	for _, e := range errs {
 		if e != nil {
-			return nil, "", e
+			return nil, "", redactInfo{}, e
 		}
+	}
+
+	var merged redactInfo
+	for _, info := range infos {
+		merged = merged.merge(info)
 	}
 
 	// Substitute sanitized bodies back into the parts, then serialize with the
@@ -149,32 +213,32 @@ func (h *Handler) processMultipart(ctx context.Context, r *http.Request, route p
 	}
 	serialized, err := payload.Serialize()
 	if err != nil {
-		return nil, "", newBlock("re-serialization failed")
+		return nil, "", redactInfo{}, newBlock("re-serialization failed")
 	}
-	return serialized, ct, nil
+	return serialized, ct, merged, nil
 }
 
 // processRaw reads a single non-multipart body under the cap and sanitizes it.
 // The forwarded Content-Type is the original (the body is a single object).
-func (h *Handler) processRaw(ctx context.Context, r *http.Request, route policy.Route, ct string) ([]byte, string, error) {
+func (h *Handler) processRaw(ctx context.Context, r *http.Request, route policy.Route, ct string) ([]byte, string, redactInfo, error) {
 	raw, err := intercept.ReadRawBody(r.Body, route.MaxBytes)
 	if err != nil {
 		if errors.Is(err, intercept.ErrTooLarge) {
-			return nil, "", errTooLarge
+			return nil, "", redactInfo{}, errTooLarge
 		}
-		return nil, "", newBlock("body read failed")
+		return nil, "", redactInfo{}, newBlock("body read failed")
 	}
-	out, perr := h.sanitizeItem(ctx, route, raw.Bytes)
+	out, info, perr := h.sanitizeItem(ctx, route, raw.Bytes)
 	if perr != nil {
-		return nil, "", perr
+		return nil, "", redactInfo{}, perr
 	}
-	return out, ct, nil
+	return out, ct, info, nil
 }
 
 // sanitizeItem classifies one item by magic bytes and runs it through the
 // sanitizer under a pool slot (the per-image-job bound). Backpressure maps to a
 // 503 sentinel; context cancellation maps to a block (origin gets nothing).
-func (h *Handler) sanitizeItem(ctx context.Context, route policy.Route, data []byte) ([]byte, error) {
+func (h *Handler) sanitizeItem(ctx context.Context, route policy.Route, data []byte) ([]byte, redactInfo, error) {
 	isImage := sniffIsImage(data)
 
 	// Only acquire a pool slot for work that actually decodes/encodes an image
@@ -185,19 +249,19 @@ func (h *Handler) sanitizeItem(ctx context.Context, route policy.Route, data []b
 		release, err := h.pool.Acquire(ctx)
 		if err != nil {
 			if errors.Is(err, pool.ErrBackpressure) || errors.Is(err, pool.ErrDraining) {
-				return nil, errBackpressure
+				return nil, redactInfo{}, errBackpressure
 			}
 			// Context canceled while waiting: block, never forward.
-			return nil, newBlock("request canceled")
+			return nil, redactInfo{}, newBlock("request canceled")
 		}
 		defer release()
 	}
 
 	res, err := h.sanitizer.SanitizeImage(ctx, route, data, isImage)
 	if err != nil {
-		return nil, err
+		return nil, redactInfo{}, err
 	}
-	return res.Output, nil
+	return res.Output, redactInfo{count: res.BoxCount, categories: res.Categories}, nil
 }
 
 // forward sends the sanitized body to the origin and copies the origin's
@@ -205,7 +269,7 @@ func (h *Handler) sanitizeItem(ctx context.Context, route policy.Route, data []b
 // path, query, and most headers, sets a recomputed Content-Length, and uses
 // the provided Content-Type (boundary preserved). The gateway's own failure to
 // reach the origin yields a short 502 with no body bytes.
-func (h *Handler) forward(w http.ResponseWriter, r *http.Request, body []byte, contentType string) {
+func (h *Handler) forward(w http.ResponseWriter, r *http.Request, body []byte, contentType string, info redactInfo) {
 	target := *h.origin
 	target.Path = singleJoin(h.origin.Path, r.URL.Path)
 	target.RawQuery = r.URL.RawQuery
@@ -235,6 +299,8 @@ func (h *Handler) forward(w http.ResponseWriter, r *http.Request, body []byte, c
 	defer func() { _ = resp.Body.Close() }()
 
 	copyHeaders(w.Header(), resp.Header)
+	// Overwrite any origin copy of these headers: count and labels only.
+	setRedactedHeaders(w.Header(), info)
 	w.WriteHeader(resp.StatusCode)
 	_, _ = io.Copy(w, resp.Body)
 }
@@ -248,6 +314,9 @@ func (h *Handler) writeError(w http.ResponseWriter, err error) {
 	case errors.Is(err, errBackpressure):
 		writeStatus(w, http.StatusServiceUnavailable, "server busy")
 	case IsDrop(err):
+		// Drop never runs detectors; still emit 0 / empty so clients can
+		// branch the same way as a clean pass-through.
+		setRedactedHeaders(w.Header(), redactInfo{})
 		writeStatus(w, http.StatusUnprocessableEntity, "upload rejected")
 	case IsBlock(err):
 		writeStatus(w, http.StatusUnprocessableEntity, "upload blocked")
