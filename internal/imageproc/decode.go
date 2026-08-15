@@ -23,6 +23,14 @@ const (
 	FormatJPEG Format = "jpeg"
 	// FormatPNG is the PNG encoding.
 	FormatPNG Format = "png"
+	// FormatGIF is GIF (sniffed; this build cannot mask it).
+	FormatGIF Format = "gif"
+	// FormatWebP is WebP (sniffed; this build cannot mask it).
+	FormatWebP Format = "webp"
+	// FormatBMP is BMP (sniffed; this build cannot mask it).
+	FormatBMP Format = "bmp"
+	// FormatTIFF is TIFF (sniffed; this build cannot mask it).
+	FormatTIFF Format = "tiff"
 )
 
 // Errors returned by the decode path. Callers (the pipeline) translate these
@@ -64,28 +72,36 @@ func DetectFormat(data []byte) (Format, error) {
 	}
 }
 
+// SniffFormat returns the image format named by the leading magic bytes,
+// including codecs this build cannot mask (GIF/WebP/BMP/TIFF). ok is false
+// for non-image bytes. Classification is by magic bytes, never by Content-Type.
+func SniffFormat(data []byte) (Format, bool) {
+	switch {
+	case len(data) >= 3 && data[0] == 0xFF && data[1] == 0xD8 && data[2] == 0xFF:
+		return FormatJPEG, true
+	case len(data) >= 8 && string(data[:8]) == "\x89PNG\r\n\x1a\n":
+		return FormatPNG, true
+	case len(data) >= 6 && (string(data[:6]) == "GIF87a" || string(data[:6]) == "GIF89a"):
+		return FormatGIF, true
+	case len(data) >= 12 && string(data[:4]) == "RIFF" && string(data[8:12]) == "WEBP":
+		return FormatWebP, true
+	case len(data) >= 2 && data[0] == 0x42 && data[1] == 0x4D:
+		return FormatBMP, true
+	case len(data) >= 4 && (string(data[:4]) == "II*\x00" || string(data[:4]) == "MM\x00*"):
+		return FormatTIFF, true
+	default:
+		return "", false
+	}
+}
+
 // SniffIsImage reports whether the leading bytes look like ANY image format
 // (including ones this build cannot mask, such as GIF/WebP). It is used for
 // classification: an item that is an image but in an unsupported format must
 // be blocked on a redact route, whereas a genuinely non-image item passes
 // through. Classification is by magic bytes, never by Content-Type.
 func SniffIsImage(data []byte) bool {
-	switch {
-	case len(data) >= 3 && data[0] == 0xFF && data[1] == 0xD8 && data[2] == 0xFF: // JPEG
-		return true
-	case len(data) >= 8 && string(data[:8]) == "\x89PNG\r\n\x1a\n": // PNG
-		return true
-	case len(data) >= 6 && (string(data[:6]) == "GIF87a" || string(data[:6]) == "GIF89a"): // GIF
-		return true
-	case len(data) >= 12 && string(data[:4]) == "RIFF" && string(data[8:12]) == "WEBP": // WebP
-		return true
-	case len(data) >= 2 && data[0] == 0x42 && data[1] == 0x4D: // BMP
-		return true
-	case len(data) >= 4 && (string(data[:4]) == "II*\x00" || string(data[:4]) == "MM\x00*"): // TIFF
-		return true
-	default:
-		return false
-	}
+	_, ok := SniffFormat(data)
+	return ok
 }
 
 // Decode reads dimensions via DecodeConfig FIRST and refuses width*height >

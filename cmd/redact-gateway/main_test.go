@@ -119,6 +119,22 @@ func TestBuildPolicyTranslatesRoutes(t *testing.T) {
 	}
 }
 
+func TestBuildPolicyCopiesAcceptedFormats(t *testing.T) {
+	cfg := &config.Config{
+		Routes: []config.RouteConfig{
+			{PathPrefix: "/j", Action: "redact", MaxBytes: 1024, AcceptedFormats: []string{"jpeg"}},
+		},
+	}
+	pol, err := buildPolicy(cfg)
+	if err != nil {
+		t.Fatalf("buildPolicy: %v", err)
+	}
+	r, ok := pol.Match("/j/x")
+	if !ok || len(r.AcceptedFormats) != 1 || r.AcceptedFormats[0] != "jpeg" {
+		t.Fatalf("accepted_formats not copied onto policy.Route: %+v", r)
+	}
+}
+
 func TestBuildPolicyAppliesGlobalFailOpen(t *testing.T) {
 	// Regression: a global fail_open:true must reach the resolved policy.Route
 	// for a route that does not set fail_open (previously buildPolicy read only

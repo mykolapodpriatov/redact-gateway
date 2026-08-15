@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -32,31 +33,33 @@ const (
 // are pointers so an omitted field can inherit the global value while an
 // explicit per-route value (including false) wins.
 type RouteConfig struct {
-	PathPrefix    string   `json:"path_prefix"`
-	Action        string   `json:"action"`
-	Detectors     []string `json:"detectors"`
-	FailOpen      *bool    `json:"fail_open"`
-	MaxBytes      int64    `json:"max_bytes"`
-	StripMetadata *bool    `json:"strip_metadata"`
+	PathPrefix      string   `json:"path_prefix"`
+	Action          string   `json:"action"`
+	Detectors       []string `json:"detectors"`
+	FailOpen        *bool    `json:"fail_open"`
+	MaxBytes        int64    `json:"max_bytes"`
+	StripMetadata   *bool    `json:"strip_metadata"`
+	AcceptedFormats []string `json:"accepted_formats"`
 }
 
 // Config is the full gateway configuration.
 type Config struct {
-	Listen         string        `json:"listen"`
-	MetricsListen  string        `json:"metrics_listen"`
-	Origin         string        `json:"origin"`
-	Routes         []RouteConfig `json:"routes"`
-	AuditPath      string        `json:"audit_path"`
-	WorkerPoolSize int           `json:"worker_pool_size"`
-	MaxBytes       int64         `json:"max_bytes"`
-	MaxPixels      int64         `json:"max_pixels"`
-	FailOpen       bool          `json:"fail_open"`
-	StripMetadata  bool          `json:"strip_metadata"`
-	JPEGQuality    int           `json:"jpeg_quality"`
-	BlurRadius     int           `json:"blur_radius"`
-	MemoryCeiling  int64         `json:"memory_ceiling"`
-	AcquireTimeout Duration      `json:"acquire_timeout"`
-	DrainTimeout   Duration      `json:"drain_timeout"`
+	Listen          string        `json:"listen"`
+	MetricsListen   string        `json:"metrics_listen"`
+	Origin          string        `json:"origin"`
+	Routes          []RouteConfig `json:"routes"`
+	AuditPath       string        `json:"audit_path"`
+	WorkerPoolSize  int           `json:"worker_pool_size"`
+	MaxBytes        int64         `json:"max_bytes"`
+	MaxPixels       int64         `json:"max_pixels"`
+	FailOpen        bool          `json:"fail_open"`
+	StripMetadata   bool          `json:"strip_metadata"`
+	AcceptedFormats []string      `json:"accepted_formats"`
+	JPEGQuality     int           `json:"jpeg_quality"`
+	BlurRadius      int           `json:"blur_radius"`
+	MemoryCeiling   int64         `json:"memory_ceiling"`
+	AcquireTimeout  Duration      `json:"acquire_timeout"`
+	DrainTimeout    Duration      `json:"drain_timeout"`
 }
 
 // Duration is a time.Duration that marshals to/from a Go duration string (for
@@ -97,6 +100,19 @@ var KnownDetectors = map[string]bool{
 	"regex-pii":     true,
 	"full-image":    true,
 	"fake":          true,
+}
+
+// KnownFormats is the set of sniffed codec names operators may put in
+// accepted_formats. Empty accepted_formats means any sniffed image (today's
+// behavior). "jpg" is accepted as an alias of "jpeg".
+var KnownFormats = map[string]bool{
+	"jpeg": true,
+	"jpg":  true,
+	"png":  true,
+	"webp": true,
+	"gif":  true,
+	"bmp":  true,
+	"tiff": true,
 }
 
 // Load reads and parses the JSON config at path, applies environment
@@ -199,6 +215,11 @@ func (cfg *Config) applyDefaults() {
 			v := cfg.FailOpen
 			cfg.Routes[i].FailOpen = &v
 		}
+		// nil (omitted) inherits the global allowlist; an explicit empty
+		// slice stays empty and means "any sniffed image".
+		if cfg.Routes[i].AcceptedFormats == nil {
+			cfg.Routes[i].AcceptedFormats = append([]string(nil), cfg.AcceptedFormats...)
+		}
 	}
 }
 
@@ -228,6 +249,9 @@ func (cfg *Config) Validate() error {
 	if product > cfg.MemoryCeiling {
 		return fmt.Errorf("config: worker_pool_size*max_bytes=%d exceeds memory_ceiling=%d", product, cfg.MemoryCeiling)
 	}
+	if err := validateAcceptedFormats(cfg.AcceptedFormats); err != nil {
+		return fmt.Errorf("config: %w", err)
+	}
 	for _, r := range cfg.Routes {
 		action := Action(r.Action)
 		if !action.valid() {
@@ -236,10 +260,23 @@ func (cfg *Config) Validate() error {
 		if r.MaxBytes < 1 {
 			return fmt.Errorf("config: route %q max_bytes must be >= 1", r.PathPrefix)
 		}
+		if err := validateAcceptedFormats(r.AcceptedFormats); err != nil {
+			return fmt.Errorf("config: route %q: %w", r.PathPrefix, err)
+		}
 		for _, d := range r.Detectors {
 			if !KnownDetectors[d] {
 				return fmt.Errorf("config: route %q references unknown detector %q", r.PathPrefix, d)
 			}
+		}
+	}
+	return nil
+}
+
+func validateAcceptedFormats(names []string) error {
+	for _, n := range names {
+		key := strings.ToLower(strings.TrimSpace(n))
+		if !KnownFormats[key] {
+			return fmt.Errorf("unknown accepted format %q", n)
 		}
 	}
 	return nil

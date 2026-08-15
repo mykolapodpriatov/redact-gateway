@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -264,6 +265,56 @@ func TestFailOpenDefaultsFalse(t *testing.T) {
 	}
 	if cfg.Routes[0].FailOpen == nil || *cfg.Routes[0].FailOpen {
 		t.Fatalf("route fail_open should default to false, got %v", cfg.Routes[0].FailOpen)
+	}
+}
+
+func TestValidateUnknownAcceptedFormat(t *testing.T) {
+	p := writeConfig(t, `{
+		"origin": "http://o:1",
+		"accepted_formats": ["jpeg", "heic"],
+		"routes": []
+	}`)
+	if _, err := config.Load(p); err == nil {
+		t.Fatal("expected error for unknown accepted format")
+	}
+}
+
+func TestValidateUnknownRouteAcceptedFormat(t *testing.T) {
+	p := writeConfig(t, `{
+		"origin": "http://o:1",
+		"routes": [{"path_prefix": "/u", "action": "redact", "accepted_formats": ["foo"]}]
+	}`)
+	if _, err := config.Load(p); err == nil {
+		t.Fatal("expected error for unknown per-route accepted format")
+	}
+}
+
+func TestAcceptedFormatsKnownNamesAndInherit(t *testing.T) {
+	p := writeConfig(t, `{
+		"origin": "http://o:1",
+		"accepted_formats": ["jpeg", "png", "webp", "gif"],
+		"routes": [
+			{"path_prefix": "/inherits", "action": "pass"},
+			{"path_prefix": "/any", "action": "pass", "accepted_formats": []},
+			{"path_prefix": "/jpeg", "action": "redact", "accepted_formats": ["jpg"]}
+		]
+	}`)
+	cfg, err := config.Load(p)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	byPrefix := map[string][]string{}
+	for _, r := range cfg.Routes {
+		byPrefix[r.PathPrefix] = r.AcceptedFormats
+	}
+	if got := strings.Join(byPrefix["/inherits"], ","); got != "jpeg,png,webp,gif" {
+		t.Fatalf("inherited allowlist = %q", got)
+	}
+	if len(byPrefix["/any"]) != 0 {
+		t.Fatalf("explicit empty allowlist should stay empty, got %v", byPrefix["/any"])
+	}
+	if got := strings.Join(byPrefix["/jpeg"], ","); got != "jpg" {
+		t.Fatalf("per-route override = %q", got)
 	}
 }
 
