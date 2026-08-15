@@ -38,6 +38,39 @@ func TestLongestPrefixMatch(t *testing.T) {
 	}
 }
 
+func TestSegmentBoundaryDoesNotMatchSiblingPaths(t *testing.T) {
+	p, err := policy.New([]policy.Route{
+		{PathPrefix: "/api", Action: policy.ActionRedact, MaxBytes: 1},
+		{PathPrefix: "/", Action: policy.ActionPass, MaxBytes: 1},
+	})
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+
+	cases := []struct {
+		path   string
+		action policy.Action
+		prefix string
+	}{
+		{"/api", policy.ActionRedact, "/api"},
+		{"/api/", policy.ActionRedact, "/api"},
+		{"/api/x", policy.ActionRedact, "/api"},
+		{"/apidocs/img.png", policy.ActionPass, "/"},
+		{"/apikeys/x", policy.ActionPass, "/"},
+		{"/api-internal", policy.ActionPass, "/"},
+	}
+	for _, c := range cases {
+		r, ok := p.Match(c.path)
+		if !ok {
+			t.Fatalf("%s: no match", c.path)
+		}
+		if r.Action != c.action || r.PathPrefix != c.prefix {
+			t.Fatalf("%s: got action=%s prefix=%s, want action=%s prefix=%s",
+				c.path, r.Action, r.PathPrefix, c.action, c.prefix)
+		}
+	}
+}
+
 func TestNoMatchNoDefault(t *testing.T) {
 	p, err := policy.New([]policy.Route{
 		{PathPrefix: "/api", Action: policy.ActionRedact, MaxBytes: 1},

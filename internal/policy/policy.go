@@ -1,6 +1,6 @@
 // Package policy maps request paths to a redaction Action and the per-route
 // safety settings (fail-open opt-in, per-part size cap, metadata stripping,
-// detector selection). Matching is longest-prefix and deterministic.
+// detector selection). Matching is longest path-segment prefix and deterministic.
 package policy
 
 import (
@@ -42,8 +42,9 @@ func (a Action) Masks() bool {
 	return a == ActionRedact || a == ActionBlur
 }
 
-// Route is a single policy rule. PathPrefix is matched longest-first against
-// the request path; Action is applied to the union of all detector regions;
+// Route is a single policy rule. PathPrefix is matched longest-first as a
+// path-segment prefix of the request path; Action is applied to the union of
+// all detector regions;
 // Detectors names which configured detectors run; FailOpen, when true, lets
 // the route forward original bytes on a sanitize failure (UNSAFE, default
 // false); MaxBytes caps each individual part/body (per-part, not just outer);
@@ -98,12 +99,14 @@ func New(routes []Route) (*Policy, error) {
 	return p, nil
 }
 
-// Match returns the route whose PathPrefix is the longest prefix of path. If
-// none matches, the default route is returned (ok=true). If there is no
-// default and nothing matches, ok=false.
+// Match returns the route whose PathPrefix is the longest path-segment prefix
+// of path. A prefix p matches when path == p or path starts with p followed
+// by '/'. Configured prefixes are normalized to drop a trailing slash (root
+// "/" stays the default route). If none matches, the default route is
+// returned (ok=true). If there is no default and nothing matches, ok=false.
 func (p *Policy) Match(path string) (Route, bool) {
 	for _, r := range p.routes {
-		if strings.HasPrefix(path, r.PathPrefix) {
+		if matchPathPrefix(path, r.PathPrefix) {
 			return r, true
 		}
 	}
@@ -111,6 +114,20 @@ func (p *Policy) Match(path string) (Route, bool) {
 		return p.defroute, true
 	}
 	return Route{}, false
+}
+
+// matchPathPrefix reports whether path is p or is nested under p as a
+// subsequent path segment. A raw string prefix is not enough: "/api" must
+// not match "/apidocs" or "/api-internal".
+func matchPathPrefix(path, prefix string) bool {
+	p := strings.TrimRight(prefix, "/")
+	if p == "" {
+		return true
+	}
+	if path == p {
+		return true
+	}
+	return strings.HasPrefix(path, p+"/")
 }
 
 // FailClosed reports whether a sanitize failure on this route must block the
