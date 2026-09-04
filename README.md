@@ -102,6 +102,22 @@ When `metrics_listen` is set (it is **off by default**), the gateway serves `GET
 - `redact_images_sanitized_total` — images decoded, masked, and re-encoded,
 - `redact_regions_masked_total` — sensitive regions masked across all images.
 
+`redact_uploads_blocked_total` on its own says how many uploads were blocked and never why, which is not something an operator can act on: a decompression bomb, a client that started sending WebP, a broken detector and a full audit disk all land in the same number. It is broken down by cause:
+
+| Counter | Cause |
+| --- | --- |
+| `redact_uploads_blocked_decode_total` | The image was corrupt or truncated. |
+| `redact_uploads_blocked_unsupported_format_total` | A format the gateway cannot mask (classified by magic bytes). |
+| `redact_uploads_blocked_too_large_total` | Over the pixel cap (the decompression-bomb guard). |
+| `redact_uploads_blocked_detector_error_total` | A detector returned an error. |
+| `redact_uploads_blocked_strip_total` | Metadata could not be stripped on a `pass` route. |
+| `redact_uploads_blocked_encode_total` | The masked image could not be re-encoded. |
+| `redact_uploads_blocked_audit_total` | The audit entry could not be written. |
+| `redact_uploads_blocked_policy_total` | A `drop` route, or an unknown action. |
+| `redact_uploads_blocked_canceled_total` | The request was canceled mid-sanitize. |
+
+The breakdown always sums to `redact_uploads_blocked_total`, which keeps its old meaning, so existing dashboards and alerts are unaffected. Every reason is exported at zero from the first scrape, because a counter that only appears once it fires is a counter nobody can alert on. A reason is a compile-time constant the gateway picks from a closed set, never anything derived from the upload, so the breakdown does not weaken the no-leak rule below.
+
 Every sample is an **unlabeled** counter: no image bytes, filenames, or request-derived strings are ever attached to a metric, so the metrics surface can't become a leak channel — the same fail-closed no-leak invariant the audit log upholds.
 
 ## Scope (honest by design)
