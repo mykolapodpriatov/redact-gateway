@@ -5,16 +5,21 @@
 //
 // The counters are process-wide monotonic totals and safe for concurrent use.
 // By design NOTHING request-derived is ever recorded — no image bytes, no
-// filenames, no categories, no per-request labels of any kind. Every sample is
-// emitted with a bare metric name and an integer value, so the metrics surface
-// cannot become a leak channel for the content the gateway is meant to redact.
-// This preserves the repo's fail-closed no-leak invariant.
+// filenames, no categories, no per-request labels of any kind, so the metrics
+// surface cannot become a leak channel for the content the gateway is meant to
+// redact. This preserves the repo's fail-closed no-leak invariant.
+//
+// redact_build_info is the single labeled series, and it is the exception that
+// shows the rule: its labels are the link-time version and the compiled-in Go
+// runtime version, both fixed before the process ever sees a request. A test
+// asserts it is the only series carrying labels.
 package metrics
 
 import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"sync/atomic"
 )
 
@@ -71,6 +76,32 @@ type Metrics struct {
 	// blockedByReason breaks uploadsBlocked down by cause. Every increment
 	// bumps both, so the per-reason counters always sum to uploadsBlocked.
 	blockedByReason [numBlockReasons]atomic.Uint64
+
+	// buildVersion and buildGoVersion back redact_build_info. They are set
+	// once at startup from link-time and compile-time constants, before the
+	// server binds, so no lock is needed and no request can influence them.
+	buildVersion   string
+	buildGoVersion string
+}
+
+// SetBuildInfo records the build identity exported as redact_build_info. Call
+// it once during startup, before serving. Empty values mean the series is not
+// exported at all, which keeps a Metrics built by a test free of it.
+func (m *Metrics) SetBuildInfo(version, goVersion string) {
+	if m == nil {
+		return
+	}
+	m.buildVersion = version
+	m.buildGoVersion = goVersion
+}
+
+// escapeLabelValue applies the Prometheus text-format escaping rules. The
+// version arrives from -ldflags and is therefore attacker-controlled only by
+// whoever builds the binary, but an unescaped quote would still corrupt the
+// exposition for every other series, so it is escaped rather than trusted.
+func escapeLabelValue(v string) string {
+	r := strings.NewReplacer(`\`, `\\`, `"`, `\"`, "\n", `\n`)
+	return r.Replace(v)
 }
 
 // New returns a ready-to-use Metrics with all counters at zero.
@@ -116,23 +147,36 @@ func (m *Metrics) AddRegionsMasked(n int) {
 	}
 }
 
-// sample is one exported counter: a bare name, a help string, and its value.
+// sample is one exported series: a name, a help string, its value, and its
+// metric type. labels is empty for every counter; only redact_build_info sets
+// it, and only from build-time constants.
 type sample struct {
 	name, help string
 	value      uint64
+	typ        string // "counter" or "gauge"; empty means counter
+	labels     string // rendered label set including braces, or ""
 }
 
 func (m *Metrics) samples() []sample {
 	out := []sample{
-		{"redact_uploads_processed_total", "Total upload items processed by the gateway.", m.uploadsProcessed.Load()},
-		{"redact_uploads_blocked_total", "Total upload items blocked fail-closed (origin received nothing).", m.uploadsBlocked.Load()},
-		{"redact_images_sanitized_total", "Total images decoded, masked, and re-encoded.", m.imagesSanitized.Load()},
-		{"redact_regions_masked_total", "Total sensitive regions masked across all images.", m.regionsMasked.Load()},
+		{name: "redact_uploads_processed_total", help: "Total upload items processed by the gateway.", value: m.uploadsProcessed.Load()},
+		{name: "redact_uploads_blocked_total", help: "Total upload items blocked fail-closed (origin received nothing).", value: m.uploadsBlocked.Load()},
+		{name: "redact_images_sanitized_total", help: "Total images decoded, masked, and re-encoded.", value: m.imagesSanitized.Load()},
+		{name: "redact_regions_masked_total", help: "Total sensitive regions masked across all images.", value: m.regionsMasked.Load()},
+	}
+	if m.buildVersion != "" || m.buildGoVersion != "" {
+		out = append(out, sample{
+			name:   "redact_build_info",
+			help:   "Build identity of the running gateway; the value is always 1.",
+			value:  1,
+			typ:    "gauge",
+			labels: fmt.Sprintf(`{version="%s",go_version="%s"}`, escapeLabelValue(m.buildVersion), escapeLabelValue(m.buildGoVersion)),
+		})
 	}
 	// The breakdown is emitted in reason order, always, including at zero: a
 	// counter that only appears once it fires is a counter nobody can alert on.
 	for r := ReasonUnset + 1; r < numBlockReasons; r++ {
-		out = append(out, sample{blockReasonMetric[r].name, blockReasonMetric[r].help, m.blockedByReason[r].Load()})
+		out = append(out, sample{name: blockReasonMetric[r].name, help: blockReasonMetric[r].help, value: m.blockedByReason[r].Load()})
 	}
 	return out
 }
@@ -160,7 +204,11 @@ func (m *Metrics) WriteProm(w io.Writer) error {
 		return nil
 	}
 	for _, s := range m.samples() {
-		if _, err := fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s counter\n%s %d\n", s.name, s.help, s.name, s.name, s.value); err != nil {
+		typ := s.typ
+		if typ == "" {
+			typ = "counter"
+		}
+		if _, err := fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s %s\n%s%s %d\n", s.name, s.help, s.name, typ, s.name, s.labels, s.value); err != nil {
 			return err
 		}
 	}

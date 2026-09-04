@@ -220,10 +220,12 @@ func TestUnsetReasonStillCountsTotal(t *testing.T) {
 	}
 }
 
-// The no-leak invariant: the exposition stays label-free, so no string can
-// ride out on a metric even now that blocks are categorised.
-func TestExpositionHasNoLabels(t *testing.T) {
+// The no-leak invariant: redact_build_info is the ONLY labeled series, and its
+// labels are build-time constants. Every counter stays bare, so no
+// request-derived string can ride out on a metric.
+func TestBuildInfoIsTheOnlyLabeledSeries(t *testing.T) {
 	m := metrics.New()
+	m.SetBuildInfo("v1.2.3", "go1.24.0")
 	for _, tc := range allReasons {
 		m.IncUploadsBlocked(tc.reason)
 	}
@@ -235,10 +237,71 @@ func TestExpositionHasNoLabels(t *testing.T) {
 		if strings.HasPrefix(line, "#") || line == "" {
 			continue
 		}
-		if strings.ContainsAny(line, "{}") {
+		if !strings.ContainsAny(line, "{}") {
+			continue
+		}
+		if !strings.HasPrefix(line, "redact_build_info{") {
 			t.Errorf("sample line carries a label: %q", line)
 		}
 	}
+}
+
+// The build-info series carries the version and the Go version, is typed as a
+// gauge, and always has the value 1.
+func TestBuildInfoExposition(t *testing.T) {
+	m := metrics.New()
+	m.SetBuildInfo("v1.2.3", "go1.24.0")
+	var buf bytes.Buffer
+	if err := m.WriteProm(&buf); err != nil {
+		t.Fatalf("WriteProm: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{
+		"# TYPE redact_build_info gauge\n",
+		`redact_build_info{version="v1.2.3",go_version="go1.24.0"} 1` + "\n",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("exposition missing %q; got:\n%s", want, out)
+		}
+	}
+}
+
+// Without SetBuildInfo the series is absent rather than exported empty.
+func TestBuildInfoAbsentWhenUnset(t *testing.T) {
+	var buf bytes.Buffer
+	if err := metrics.New().WriteProm(&buf); err != nil {
+		t.Fatalf("WriteProm: %v", err)
+	}
+	if strings.Contains(buf.String(), "redact_build_info") {
+		t.Error("redact_build_info exported without SetBuildInfo")
+	}
+}
+
+// A version string with a quote or a backslash in it must not be able to break
+// out of its label and corrupt the exposition for every other series.
+func TestBuildInfoEscapesLabelValues(t *testing.T) {
+	m := metrics.New()
+	m.SetBuildInfo(`v1"2\3`+"\n", "go1.24.0")
+	var buf bytes.Buffer
+	if err := m.WriteProm(&buf); err != nil {
+		t.Fatalf("WriteProm: %v", err)
+	}
+	want := `redact_build_info{version="v1\"2\\3\n",go_version="go1.24.0"} 1`
+	if !strings.Contains(buf.String(), want) {
+		t.Errorf("exposition missing %q; got:\n%s", want, buf.String())
+	}
+	// One line, still: an unescaped newline would have split the series.
+	for _, line := range strings.Split(buf.String(), "\n") {
+		if strings.HasPrefix(line, "redact_build_info") && !strings.HasSuffix(line, " 1") {
+			t.Errorf("build info line is malformed: %q", line)
+		}
+	}
+}
+
+// A nil *Metrics accepts SetBuildInfo without panicking.
+func TestSetBuildInfoNilSafe(t *testing.T) {
+	var m *metrics.Metrics
+	m.SetBuildInfo("v1", "go1")
 }
 
 // Every reason's counter appears in the exposition even before it fires.
