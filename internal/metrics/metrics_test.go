@@ -2,6 +2,7 @@ package metrics_test
 
 import (
 	"bytes"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -15,7 +16,7 @@ func TestCountersAndExposition(t *testing.T) {
 	m.IncUploadsProcessed()
 	m.IncUploadsProcessed()
 	m.IncUploadsProcessed()
-	m.IncUploadsBlocked()
+	m.IncUploadsBlocked(metrics.ReasonDecode)
 	m.IncImagesSanitized()
 	m.IncImagesSanitized()
 	m.AddRegionsMasked(5)
@@ -112,7 +113,7 @@ func TestHandlerHealthzAndMetrics(t *testing.T) {
 func TestNilMetricsIsNoOp(t *testing.T) {
 	var m *metrics.Metrics
 	m.IncUploadsProcessed()
-	m.IncUploadsBlocked()
+	m.IncUploadsBlocked(metrics.ReasonDecode)
 	m.IncImagesSanitized()
 	m.AddRegionsMasked(7)
 	var buf bytes.Buffer
@@ -121,5 +122,134 @@ func TestNilMetricsIsNoOp(t *testing.T) {
 	}
 	if buf.Len() != 0 {
 		t.Fatalf("nil metrics wrote %d bytes, want 0", buf.Len())
+	}
+}
+
+// ---- per-reason block breakdown --------------------------------------------
+
+// allReasons is every real BlockReason paired with the metric it must land in.
+var allReasons = []struct {
+	reason metrics.BlockReason
+	metric string
+}{
+	{metrics.ReasonDecode, "redact_uploads_blocked_decode_total"},
+	{metrics.ReasonUnsupportedFormat, "redact_uploads_blocked_unsupported_format_total"},
+	{metrics.ReasonTooLarge, "redact_uploads_blocked_too_large_total"},
+	{metrics.ReasonDetectorError, "redact_uploads_blocked_detector_error_total"},
+	{metrics.ReasonStrip, "redact_uploads_blocked_strip_total"},
+	{metrics.ReasonEncode, "redact_uploads_blocked_encode_total"},
+	{metrics.ReasonAudit, "redact_uploads_blocked_audit_total"},
+	{metrics.ReasonPolicy, "redact_uploads_blocked_policy_total"},
+	{metrics.ReasonCanceled, "redact_uploads_blocked_canceled_total"},
+}
+
+// Each reason lands in its own counter, and every counter is exported even at
+// zero so an operator can alert on it before it has ever fired.
+func TestBlockedByReasonRoutesEachReason(t *testing.T) {
+	for _, tc := range allReasons {
+		t.Run(tc.metric, func(t *testing.T) {
+			m := metrics.New()
+			m.IncUploadsBlocked(tc.reason)
+			got := m.BlockedByReason()
+			if got[tc.metric] != 1 {
+				t.Errorf("%s = %d, want 1", tc.metric, got[tc.metric])
+			}
+			for _, other := range allReasons {
+				if other.metric != tc.metric && got[other.metric] != 0 {
+					t.Errorf("%s = %d, want 0", other.metric, got[other.metric])
+				}
+			}
+		})
+	}
+}
+
+// The breakdown always sums to the total after a mixed run.
+func TestBlockedByReasonSumsToTotal(t *testing.T) {
+	m := metrics.New()
+	counts := map[metrics.BlockReason]int{
+		metrics.ReasonDecode:        3,
+		metrics.ReasonPolicy:        2,
+		metrics.ReasonCanceled:      1,
+		metrics.ReasonDetectorError: 4,
+	}
+	total := 0
+	for reason, n := range counts {
+		for i := 0; i < n; i++ {
+			m.IncUploadsBlocked(reason)
+			total++
+		}
+	}
+
+	var sum uint64
+	for _, v := range m.BlockedByReason() {
+		sum += v
+	}
+	if sum != uint64(total) {
+		t.Errorf("per-reason sum = %d, want %d", sum, total)
+	}
+
+	var buf bytes.Buffer
+	if err := m.WriteProm(&buf); err != nil {
+		t.Fatalf("WriteProm: %v", err)
+	}
+	if want := fmt.Sprintf("redact_uploads_blocked_total %d\n", total); !strings.Contains(buf.String(), want) {
+		t.Errorf("exposition missing %q", want)
+	}
+}
+
+// An unattributed block still moves the total, so a future block path that
+// forgets to name a reason under-reports the breakdown instead of vanishing.
+func TestUnsetReasonStillCountsTotal(t *testing.T) {
+	m := metrics.New()
+	m.IncUploadsBlocked(metrics.ReasonUnset)
+
+	var sum uint64
+	for _, v := range m.BlockedByReason() {
+		sum += v
+	}
+	if sum != 0 {
+		t.Errorf("per-reason sum = %d, want 0 for an unset reason", sum)
+	}
+
+	var buf bytes.Buffer
+	if err := m.WriteProm(&buf); err != nil {
+		t.Fatalf("WriteProm: %v", err)
+	}
+	if !strings.Contains(buf.String(), "redact_uploads_blocked_total 1\n") {
+		t.Error("unattributed block did not move redact_uploads_blocked_total")
+	}
+}
+
+// The no-leak invariant: the exposition stays label-free, so no string can
+// ride out on a metric even now that blocks are categorised.
+func TestExpositionHasNoLabels(t *testing.T) {
+	m := metrics.New()
+	for _, tc := range allReasons {
+		m.IncUploadsBlocked(tc.reason)
+	}
+	var buf bytes.Buffer
+	if err := m.WriteProm(&buf); err != nil {
+		t.Fatalf("WriteProm: %v", err)
+	}
+	for _, line := range strings.Split(buf.String(), "\n") {
+		if strings.HasPrefix(line, "#") || line == "" {
+			continue
+		}
+		if strings.ContainsAny(line, "{}") {
+			t.Errorf("sample line carries a label: %q", line)
+		}
+	}
+}
+
+// Every reason's counter appears in the exposition even before it fires.
+func TestExpositionListsEveryReasonAtZero(t *testing.T) {
+	var buf bytes.Buffer
+	if err := metrics.New().WriteProm(&buf); err != nil {
+		t.Fatalf("WriteProm: %v", err)
+	}
+	for _, tc := range allReasons {
+		if !strings.Contains(buf.String(), tc.metric+" 0\n") {
+			t.Errorf("exposition missing %q at zero", tc.metric)
+		}
 	}
 }

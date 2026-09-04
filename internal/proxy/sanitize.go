@@ -24,12 +24,23 @@ type EncodeFunc func(img image.Image, format imageproc.Format, opts imageproc.En
 // safe to return to the client (it never contains request or image bytes).
 type blockError struct {
 	status string
+	// reason attributes the block to one of a closed set of gateway-authored
+	// causes so /metrics can break the total down. It is metrics.ReasonUnset
+	// for a block raised outside the sanitize path, which is not counted.
+	reason metrics.BlockReason
 }
 
 func (e *blockError) Error() string { return e.status }
 
-// newBlock builds a blockError with a short, byte-free status string.
+// newBlock builds an unattributed blockError with a short, byte-free status
+// string. Used by the request-level paths in handler.go, which are not counted
+// as upload items.
 func newBlock(status string) *blockError { return &blockError{status: status} }
+
+// newBlockReason builds a blockError attributed to a specific cause.
+func newBlockReason(reason metrics.BlockReason, status string) *blockError {
+	return &blockError{status: status, reason: reason}
+}
 
 // IsBlock reports whether err is a fail-closed block decision.
 func IsBlock(err error) bool {
@@ -47,6 +58,20 @@ func (e *dropError) Error() string { return e.status }
 func IsDrop(err error) bool {
 	var d *dropError
 	return errors.As(err, &d)
+}
+
+// blockReason extracts the cause an error was attributed to. A drop is always
+// a policy decision. Anything else, including an unattributed block, reports
+// metrics.ReasonUnset.
+func blockReason(err error) metrics.BlockReason {
+	var b *blockError
+	if errors.As(err, &b) {
+		return b.reason
+	}
+	if IsDrop(err) {
+		return metrics.ReasonPolicy
+	}
+	return metrics.ReasonUnset
 }
 
 // Sanitizer turns one input item (image bytes) into sanitized output bytes per
@@ -100,7 +125,7 @@ func (s *Sanitizer) SanitizeImage(ctx context.Context, route policy.Route, data 
 	// returns a nil error and is deliberately not counted as blocked.
 	defer func() {
 		if err != nil && (IsBlock(err) || IsDrop(err)) {
-			s.Metrics.IncUploadsBlocked()
+			s.Metrics.IncUploadsBlocked(blockReason(err))
 		}
 	}()
 	switch route.Action {
@@ -112,7 +137,7 @@ func (s *Sanitizer) SanitizeImage(ctx context.Context, route policy.Route, data 
 		return s.handleMask(ctx, route, data, isImage)
 	default:
 		// Unknown action: fail closed.
-		return s.failClosed(route, data, "unsupported policy action")
+		return s.failClosed(route, data, metrics.ReasonPolicy, "unsupported policy action")
 	}
 }
 
@@ -133,25 +158,25 @@ func (s *Sanitizer) handlePass(route policy.Route, data []byte, isImage bool) (*
 		case isJPEG(data):
 			stripped, err := exif.Strip(data)
 			if err != nil {
-				return s.failClosed(route, data, "metadata strip failed")
+				return s.failClosed(route, data, metrics.ReasonStrip, "metadata strip failed")
 			}
 			out = stripped
 		case isPNG(data):
 			stripped, err := exif.StripPNG(data)
 			if err != nil {
-				return s.failClosed(route, data, "metadata strip failed")
+				return s.failClosed(route, data, metrics.ReasonStrip, "metadata strip failed")
 			}
 			out = stripped
 		default:
 			// Sniffed as an image but in a format we cannot strip metadata from
 			// (GIF/WebP/BMP/TIFF). The operator asked for metadata removal and
 			// we cannot honor it, so fail closed (block) unless fail-open.
-			return s.failClosed(route, data, "metadata strip unsupported for format")
+			return s.failClosed(route, data, metrics.ReasonStrip, "metadata strip unsupported for format")
 		}
 	}
 	if isImage {
 		if err := s.audited(route, nil, out); err != nil {
-			return s.failClosed(route, data, "audit write failed")
+			return s.failClosed(route, data, metrics.ReasonAudit, "audit write failed")
 		}
 		return &ItemResult{Output: out, Audited: true}, nil
 	}
@@ -173,13 +198,13 @@ func (s *Sanitizer) handleMask(ctx context.Context, route policy.Route, data []b
 	if err != nil {
 		switch {
 		case errors.Is(err, imageproc.ErrUnsupportedFormat):
-			return s.failClosed(route, data, "unsupported image format")
+			return s.failClosed(route, data, metrics.ReasonUnsupportedFormat, "unsupported image format")
 		case errors.Is(err, imageproc.ErrTooManyPixels):
-			return s.failClosed(route, data, "image too large")
+			return s.failClosed(route, data, metrics.ReasonTooLarge, "image too large")
 		case errors.Is(err, imageproc.ErrInvalidBounds):
-			return s.failClosed(route, data, "image decode failed")
+			return s.failClosed(route, data, metrics.ReasonDecode, "image decode failed")
 		default:
-			return s.failClosed(route, data, "image decode failed")
+			return s.failClosed(route, data, metrics.ReasonDecode, "image decode failed")
 		}
 	}
 
@@ -187,9 +212,9 @@ func (s *Sanitizer) handleMask(ctx context.Context, route policy.Route, data []b
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			// Client disconnect / shutdown: never forward, never fail-open.
-			return nil, newBlock("request canceled")
+			return nil, newBlockReason(metrics.ReasonCanceled, "request canceled")
 		}
-		return s.failClosed(route, data, "detector error")
+		return s.failClosed(route, data, metrics.ReasonDetectorError, "detector error")
 	}
 
 	mode := imageproc.MaskSolid
@@ -211,11 +236,11 @@ func (s *Sanitizer) handleMask(ctx context.Context, route policy.Route, data []b
 	}
 	out, err := encode(masked, dec.Format, imageproc.EncodeOptions{JPEGQuality: s.JPEGQuality})
 	if err != nil {
-		return s.failClosed(route, data, "re-encode failed")
+		return s.failClosed(route, data, metrics.ReasonEncode, "re-encode failed")
 	}
 
 	if err := s.audited(route, regions, out); err != nil {
-		return s.failClosed(route, data, "audit write failed")
+		return s.failClosed(route, data, metrics.ReasonAudit, "audit write failed")
 	}
 	s.Metrics.IncImagesSanitized()
 	s.Metrics.AddRegionsMasked(len(regions))
@@ -280,11 +305,11 @@ func (s *Sanitizer) audited(route policy.Route, regions []detect.Region, sanitiz
 // nothing). When the route opts into fail-open (the documented UNSAFE escape
 // hatch, per-route, default off) it instead forwards the ORIGINAL bytes
 // unmodified. status is a short, byte-free string safe to return to the client.
-func (s *Sanitizer) failClosed(route policy.Route, data []byte, status string) (*ItemResult, error) {
+func (s *Sanitizer) failClosed(route policy.Route, data []byte, reason metrics.BlockReason, status string) (*ItemResult, error) {
 	if route.FailOpen {
 		return &ItemResult{Output: data, Audited: false}, nil
 	}
-	return nil, newBlock(status)
+	return nil, newBlockReason(reason, status)
 }
 
 func isJPEG(data []byte) bool {
