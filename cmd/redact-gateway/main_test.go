@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"redact-gateway/internal/config"
@@ -193,5 +195,63 @@ func TestOpenAuditStdoutAndFile(t *testing.T) {
 	close2()
 	if _, err := os.Stat(p); err != nil {
 		t.Fatalf("audit file not created: %v", err)
+	}
+}
+
+// ---- CLI surface -----------------------------------------------------------
+
+// runCLI is the whole CLI: -version short-circuits before any config is read,
+// so the flag works on a machine with no config file at all.
+func TestVersionFlagPrintsBuildVersion(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if code := runCLI([]string{"-version"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("exit code %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if got := strings.TrimSpace(stdout.String()); got != version {
+		t.Errorf("printed %q, want %q", got, version)
+	}
+	if stderr.Len() != 0 {
+		t.Errorf("wrote %q to stderr, want nothing", stderr.String())
+	}
+}
+
+// An unstamped build reports "dev", matching what a plain `go build` produces.
+func TestDefaultVersionIsDev(t *testing.T) {
+	if version != "dev" {
+		t.Errorf("version = %q, want %q for an unstamped build", version, "dev")
+	}
+}
+
+// An unknown flag is a usage error, not a crash and not a silent start.
+func TestUnknownFlagIsUsageError(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if code := runCLI([]string{"-nope"}, &stdout, &stderr); code != 2 {
+		t.Errorf("exit code %d, want 2", code)
+	}
+	if stderr.Len() == 0 {
+		t.Error("nothing written to stderr for an unknown flag")
+	}
+}
+
+// -validate reports a bad config on stderr with exit 1, and a good one on
+// stdout with exit 0, without binding a listener.
+func TestValidateFlagExitCodes(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if code := runCLI([]string{"-validate", "-config", filepath.Join(t.TempDir(), "missing.json")}, &stdout, &stderr); code != 1 {
+		t.Errorf("missing config: exit code %d, want 1", code)
+	}
+
+	path := filepath.Join(t.TempDir(), "config.json")
+	body := `{"listen":":0","origin":"http://127.0.0.1:1","routes":[{"path_prefix":"/u","action":"pass"}]}`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := runCLI([]string{"-validate", "-config", path}, &stdout, &stderr); code != 0 {
+		t.Fatalf("valid config: exit code %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "config OK") {
+		t.Errorf("stdout = %q, want it to contain \"config OK\"", stdout.String())
 	}
 }

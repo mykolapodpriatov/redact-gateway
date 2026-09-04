@@ -10,6 +10,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"image/color"
@@ -19,6 +20,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"runtime"
 	"syscall"
 	"time"
 
@@ -31,23 +33,52 @@ import (
 	"redact-gateway/internal/proxy"
 )
 
+// version is the build version, overridable at link time with
+// -ldflags "-X main.version=<v>". It is reported by -version, logged at
+// startup, and exported on /metrics as the redact_build_info gauge, so an
+// operator debugging a route can tell which build is actually running.
+var version = "dev"
+
 func main() {
-	configPath := flag.String("config", "", "path to JSON config file (env REDACT_* overrides apply)")
-	validate := flag.Bool("validate", false, "load and validate the config (routes, policy), then exit without starting the server")
-	flag.Parse()
+	os.Exit(runCLI(os.Args[1:], os.Stdout, os.Stderr))
+}
+
+// runCLI parses args against a local flag set and returns the process exit
+// code. Threading args and the two writers through the signature, instead of
+// using the global flag set and calling os.Exit inline, is what makes -version
+// and -validate testable.
+func runCLI(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("redact-gateway", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	configPath := fs.String("config", "", "path to JSON config file (env REDACT_* overrides apply)")
+	validate := fs.Bool("validate", false, "load and validate the config (routes, policy), then exit without starting the server")
+	showVersion := fs.Bool("version", false, "print the build version and exit")
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+
+	if *showVersion {
+		_, _ = fmt.Fprintln(stdout, version)
+		return 0
+	}
 
 	if *validate {
 		if _, _, _, err := validateConfig(*configPath); err != nil {
-			fmt.Fprintf(os.Stderr, "redact-gateway: config invalid: %v\n", err)
-			os.Exit(1)
+			_, _ = fmt.Fprintf(stderr, "redact-gateway: config invalid: %v\n", err)
+			return 1
 		}
-		fmt.Println("config OK")
-		return
+		_, _ = fmt.Fprintln(stdout, "config OK")
+		return 0
 	}
 
 	if err := run(*configPath); err != nil {
-		log.Fatalf("redact-gateway: %v", err)
+		_, _ = fmt.Fprintf(stderr, "redact-gateway: %v\n", err)
+		return 1
 	}
+	return 0
 }
 
 // validateConfig runs every check that does not require opening the audit
@@ -93,6 +124,8 @@ func run(configPath string) error {
 	wp := pool.New(cfg.WorkerPoolSize, time.Duration(cfg.AcquireTimeout))
 
 	met := metrics.New()
+	met.SetBuildInfo(version, runtime.Version())
+	log.Printf("redact-gateway: starting version=%s go=%s listen=%s", version, runtime.Version(), cfg.Listen)
 
 	sanitizer := &proxy.Sanitizer{
 		Registry:    registry,

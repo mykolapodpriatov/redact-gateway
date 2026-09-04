@@ -116,6 +116,14 @@ When `metrics_listen` is set (it is **off by default**), the gateway serves `GET
 | `redact_uploads_blocked_policy_total` | A `drop` route, or an unknown action. |
 | `redact_uploads_blocked_canceled_total` | The request was canceled mid-sanitize. |
 
+`redact_build_info` is a gauge with a constant value of 1, carrying the link-time version and the compiled-in Go runtime version. It is the only labeled series in the exposition, and its labels are fixed before the process ever sees a request, so it does not weaken the no-leak rule below. It is absent unless the build sets it. `redact-gateway -version` prints the same value, and it is written to the startup log line.
+
+Stamp it at build time:
+
+```bash
+go build -ldflags "-X main.version=$(git describe --tags --always --dirty)" -o redact-gateway ./cmd/redact-gateway
+```
+
 The breakdown always sums to `redact_uploads_blocked_total`, which keeps its old meaning, so existing dashboards and alerts are unaffected. Every reason is exported at zero from the first scrape, because a counter that only appears once it fires is a counter nobody can alert on. A reason is a compile-time constant the gateway picks from a closed set, never anything derived from the upload, so the breakdown does not weaken the no-leak rule below.
 
 Every sample is an **unlabeled** counter: no image bytes, filenames, or request-derived strings are ever attached to a metric, so the metrics surface can't become a leak channel — the same fail-closed no-leak invariant the audit log upholds.
@@ -139,6 +147,10 @@ go test -cover ./...
 ```
 
 CI (`.github/workflows/ci.yml`) runs `gofmt -l`, `go vet`, `go test -race`, and golangci-lint across Go 1.23 and 1.24, building **only** the default stdlib build.
+
+## Security
+
+Reporting a bypass goes through GitHub's private vulnerability reporting, not a public issue. [`SECURITY.md`](SECURITY.md) sets out what counts as a vulnerability here, anchored to the fail-closed contract above, and what does not (the documented `fail_open` opt-in, and the ML adapters excluded from the default build).
 
 ## License
 
