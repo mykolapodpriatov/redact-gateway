@@ -84,6 +84,41 @@ func TestValidateBadOrigin(t *testing.T) {
 	}
 }
 
+func TestValidateMetricsListenCollidesWithListen(t *testing.T) {
+	p := writeConfig(t, `{
+		"origin": "http://o:1",
+		"listen": ":8080",
+		"metrics_listen": ":8080",
+		"routes": []
+	}`)
+	if _, err := config.Load(p); err == nil {
+		t.Fatal("expected error: metrics_listen equals listen")
+	}
+}
+
+func TestValidateMetricsListenDistinctFromListenOK(t *testing.T) {
+	p := writeConfig(t, `{
+		"origin": "http://o:1",
+		"listen": ":8080",
+		"metrics_listen": ":9090",
+		"routes": []
+	}`)
+	if _, err := config.Load(p); err != nil {
+		t.Fatalf("distinct metrics_listen should be valid: %v", err)
+	}
+}
+
+func TestValidateMetricsListenEmptyOK(t *testing.T) {
+	p := writeConfig(t, `{
+		"origin": "http://o:1",
+		"listen": ":8080",
+		"routes": []
+	}`)
+	if _, err := config.Load(p); err != nil {
+		t.Fatalf("empty metrics_listen (disabled admin listener) should be valid: %v", err)
+	}
+}
+
 func TestValidateMemoryCeiling(t *testing.T) {
 	p := writeConfig(t, `{
 		"origin": "http://o:1",
