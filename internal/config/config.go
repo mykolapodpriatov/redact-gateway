@@ -231,6 +231,16 @@ func (cfg *Config) Validate() error {
 	if u, err := url.Parse(cfg.Origin); err != nil || u.Scheme == "" || u.Host == "" {
 		return fmt.Errorf("config: origin %q must be an absolute URL", cfg.Origin)
 	}
+	// metrics_listen shares a process with listen: the admin (healthz/metrics)
+	// server and the proxy server are two separate http.Server values bound in
+	// the same process, so an operator who points both at the same address
+	// (a copy-paste typo, or a template that forgot to change the port) gets a
+	// config that parses fine but fails at startup with "address already in
+	// use", and the admin listener never comes up. Catch the literal-string
+	// collision here so -validate reports it before the process ever binds.
+	if cfg.MetricsListen != "" && cfg.MetricsListen == cfg.Listen {
+		return fmt.Errorf("config: metrics_listen must differ from listen, both are %q", cfg.Listen)
+	}
 	if cfg.WorkerPoolSize < 1 {
 		return fmt.Errorf("config: worker_pool_size must be >= 1, got %d", cfg.WorkerPoolSize)
 	}
