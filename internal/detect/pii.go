@@ -46,7 +46,9 @@ func DefaultPIIPatterns() []PIIPattern {
 		{Category: "ssn", Regexp: regexp.MustCompile(`\b\d{3}-\d{2}-\d{4}\b`)},
 		// IBAN: 2-letter country code, 2 check digits, then 11-30 alphanumeric
 		// BBAN characters (total 15-34), matched as a single upper-case token.
-		{Category: "iban", Regexp: regexp.MustCompile(`\b[A-Z]{2}\d{2}[A-Z0-9]{11,30}\b`)},
+		// The checksum gate rejects invoice and booking codes that only share
+		// the shape.
+		{Category: "iban", Regexp: regexp.MustCompile(`\b[A-Z]{2}\d{2}[A-Z0-9]{11,30}\b`), Validate: IBANValid},
 		// Phone: E.164 canonical form — a leading '+', a non-zero country-code
 		// digit, then 7-14 more digits (8-15 digits total). The required '+'
 		// keeps bare digit runs (order/tracking IDs) from matching.
