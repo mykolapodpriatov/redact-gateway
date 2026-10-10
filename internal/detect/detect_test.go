@@ -136,6 +136,8 @@ func TestDefaultPatternsIBANAndPhone(t *testing.T) {
 		{"ibanLowercaseNearMiss", "iban gb82west12345698765432", ""},
 		{"ibanTooShortNearMiss", "acct GB82", ""},
 		{"ibanNoCheckDigitsNearMiss", "ref INVOICE2024XYZ", ""},
+		// Same shape as a real IBAN, wrong mod-97. Must not be masked.
+		{"ibanBadChecksum", "pay GB82WEST12345698765433 today", ""},
 		{"phoneE164US", "call +14155552671 please", "phone"},
 		{"phoneE164UK", "ring +442071838750", "phone"},
 		{"phoneNoPlusNearMiss", "id 1234567890", ""},
