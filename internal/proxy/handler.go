@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"path"
 	"sort"
 	"strconv"
 	"strings"
@@ -75,8 +76,25 @@ func writeStatus(w http.ResponseWriter, code int, msg string) {
 	_, _ = io.WriteString(w, msg+"\n")
 }
 
+// cleanRequestPath collapses "." and ".." before routing and before the
+// origin sees the path. Match is a segment prefix, so "/public/../private"
+// would otherwise take the public route and be forwarded unchanged.
+func cleanRequestPath(r *http.Request) {
+	raw := r.URL.Path
+	if raw == "" {
+		return
+	}
+	cleaned := path.Clean(raw)
+	if !strings.HasPrefix(cleaned, "/") {
+		cleaned = "/"
+	}
+	r.URL.Path = cleaned
+	r.URL.RawPath = ""
+}
+
 // ServeHTTP implements http.Handler.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	cleanRequestPath(r)
 	route, ok := h.policy.Match(r.URL.Path)
 	if !ok {
 		// No route and no default: refuse rather than blind-forward.

@@ -35,6 +35,7 @@ type recordingOrigin struct {
 	body          []byte
 	contentType   string
 	contentLength string
+	path          string
 	server        *httptest.Server
 }
 
@@ -46,6 +47,7 @@ func newRecordingOrigin(t *testing.T) *recordingOrigin {
 		o.mu.Lock()
 		o.hit = true
 		o.body = b
+		o.path = r.URL.Path
 		o.contentType = r.Header.Get("Content-Type")
 		o.contentLength = r.Header.Get("Content-Length")
 		o.mu.Unlock()
@@ -72,6 +74,12 @@ func (o *recordingOrigin) ContentType() string {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	return o.contentType
+}
+
+func (o *recordingOrigin) Path() string {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.path
 }
 
 func (o *recordingOrigin) ContentLength() string {
